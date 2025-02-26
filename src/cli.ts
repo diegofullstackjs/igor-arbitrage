@@ -47,7 +47,8 @@ program
     .option("-m, --max-profit <value>", "Lucro máximo permitido", parseFloat, 1000)
     .option("-l, --stop-loss <percent>", "Stop-loss em %", parseFloat, 5)
     .option("-t, --timeout <ms>", "Timeout para stop-loss em ms", parseFloat, 3600000)
-    .option("-ta, --trade-amount <value>", "Montante para trades em USDT", parseFloat, 5) // Nova opção
+    .option("-ta, --trade-amount <value>", "Montante para trades em USDT", parseFloat, 5) // Ajustado para 5
+    .option("-cr, --convergence-range <value>", "Range de convergência em USDT", parseFloat, 5) // Nova opção
     .option("--test", "Usar modo de teste (ex.: Binance Testnet)")
     .option("--all-symbols", "Monitorar todos os símbolos compatíveis das exchanges")
     .action(async (options) => {
@@ -92,6 +93,7 @@ program
         logger.info(`  Lucro mínimo: ${options.minProfit}, máximo: ${options.maxProfit}`);
         logger.info(`  Stop-loss: ${options.stopLoss}%, Timeout: ${options.timeout}ms`);
         logger.info(`  Montante da ordem: ${options.tradeAmount} USDT`);
+        logger.info(`  Range de convergência: ${options.convergenceRange} USDT`);
 
         while (true) {
             const opportunities = await monitorOpportunities(
@@ -100,9 +102,10 @@ program
                 options.minVolume,
                 options.minProfit,
                 options.maxProfit,
-                options.tradeAmount, // Passa o tradeAmount configurado
+                options.tradeAmount,
                 options.stopLoss,
-                options.timeout
+                options.timeout,
+                options.convergenceRange // Novo parâmetro
             );
 
             for (const op of opportunities) {
