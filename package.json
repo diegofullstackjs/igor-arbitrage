@@ -1,0 +1,26 @@
+{
+    "name": "multi-exchange-arbitrage",
+    "version": "1.0.0",
+    "scripts": {
+        "start": "ts-node-dev --respawn src/cli.ts",
+        "build": "tsc",
+        "monitor": "ts-node-dev --respawn src/cli.ts monitor",
+        "add-exchange": "ts-node-dev src/cli.ts add-exchange",
+        "volume-stats": "ts-node-dev src/cli.ts volume-stats"
+    },
+    "dependencies": {
+        "ccxt": "^4.x.x",
+        "commander": "^11.x.x",
+        "reflect-metadata": "^0.2.x",
+        "sqlite3": "^5.x.x",
+        "typeorm": "^0.3.x",
+        "winston": "^3.x.x",
+        "ws": "^8.x.x"
+    },
+    "devDependencies": {
+        "@types/node": "^20.x.x",
+        "@types/winston": "^2.x.x",
+        "ts-node-dev": "^2.x.x",
+        "typescript": "^5.x.x"
+    }
+}
