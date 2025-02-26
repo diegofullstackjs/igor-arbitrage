@@ -24,7 +24,7 @@ export async function monitorOpportunities(
   minVolume: number = 100,
   minProfit: number = 5,
   maxProfit: number = 1000,
-  tradeAmount: number = 10, // Ajustado para 10 como padrão
+  tradeAmount: number = 10,
   stopLossPercent: number = 5,
   stopLossTimeout: number = 3600000
 ): Promise<Opportunity[]> {
@@ -47,7 +47,7 @@ export async function monitorOpportunities(
     const instance = ex.getInstance();
     if (!marketCache[ex.name]) {
       marketCache[ex.name] = await instance.loadMarkets();
-      logger.info(`Mercados carregados para ${ex.name} - ${JSON.stringify(marketCache[ex.name])}`);
+      logger.info(`Mercados carregados para ${ex.name}`);
     }
     const markets = marketCache[ex.name];
     for (const symbol of symbols) {
@@ -74,17 +74,9 @@ export async function monitorOpportunities(
           prices[ex.name] = {};
           for (const symbol of symbols) {
             try {
-              let price: number = 0;
-              let volume: number = 0;
-              if (ex.type === "futures") {
-                const ticker = await (instance as any).fetchTicker(symbol);
-                price = ticker.last ?? 0;
-                volume = ticker.baseVolume ?? 0;
-              } else {
-                const ticker = await instance.fetchTicker(symbol);
-                price = ticker.last ?? 0;
-                volume = ticker.baseVolume ?? 0;
-              }
+              const ticker = await instance.fetchTicker(symbol);
+              const price = ticker.last ?? 0;
+              const volume = ticker.baseVolume ?? 0;
               prices[ex.name][symbol] = { price, volume };
 
               const priceEntry = new Price();
@@ -103,55 +95,57 @@ export async function monitorOpportunities(
 
       const priceEntries: Price[] = [];
       for (const symbol of symbols) {
-        for (let i = 0; i < exchanges.length; i++) {
-          for (let j = i + 1; j < exchanges.length; j++) {
-            const ex1 = exchanges[i];
-            const ex2 = exchanges[j];
-            const data1 = prices[ex1.name]?.[symbol];
-            const data2 = prices[ex2.name]?.[symbol];
-            if (!data1 || !data2) continue;
+        const spotExchanges = exchanges.filter(ex => ex.type === "spot");
+        const futuresExchanges = exchanges.filter(ex => ex.type === "futures");
 
-            const price1 = data1.price;
-            const price2 = data2.price;
-            const volume1 = data1.volume;
-            const volume2 = data2.volume;
+        for (const spotEx of spotExchanges) {
+          for (const futuresEx of futuresExchanges) {
+            const dataSpot = prices[spotEx.name]?.[symbol];
+            const dataFutures = prices[futuresEx.name]?.[symbol];
+            if (!dataSpot || !dataFutures) continue;
 
-            if (volume1 < minVolume || volume2 < minVolume) {
+            const spotPrice = dataSpot.price; // Preço na spot (compra)
+            const futuresPrice = dataFutures.price; // Preço na futures (venda)
+            const spotVolume = dataSpot.volume;
+            const futuresVolume = dataFutures.volume;
+
+            if (spotVolume < minVolume || futuresVolume < minVolume) {
               logger.warn(
-                `Volume insuficiente para ${symbol}: ${ex1.name} (${volume1}), ${ex2.name} (${volume2})`
+                `Volume insuficiente para ${symbol}: ${spotEx.name} (${spotVolume}), ${futuresEx.name} (${futuresVolume})`
               );
               continue;
             }
 
             const feeRate = 0.001;
-            const amount = tradeAmount / price1;
+            const amount = tradeAmount / spotPrice;
 
             try {
-              const [book1, book2] = await Promise.all([
-                ex1.getInstance().fetchOrderBook(symbol),
-                ex2.getInstance().fetchOrderBook(symbol),
+              const [spotBook, futuresBook] = await Promise.all([
+                spotEx.getInstance().fetchOrderBook(symbol),
+                futuresEx.getInstance().fetchOrderBook(symbol),
               ]);
-              const buyVolume = book1.bids[0]?.[1] || 0;
-              const sellVolume = book2.asks[0]?.[1] || 0;
+              const buyVolume = spotBook.bids[0]?.[1] || 0; // Volume disponível para compra na spot
+              const sellVolume = futuresBook.asks[0]?.[1] || 0; // Volume disponível para venda na futures
 
               if (buyVolume < amount || sellVolume < amount) {
                 logger.warn(
-                  `Liquidez imediata insuficiente para ${symbol}: ${ex1.name} (${buyVolume}), ${ex2.name} (${sellVolume})`
+                  `Liquidez imediata insuficiente para ${symbol}: ${spotEx.name} (${buyVolume}), ${futuresEx.name} (${sellVolume})`
                 );
                 continue;
               }
 
-              if (price1 < price2) {
-                const profitGross = (price2 - price1) * amount;
+              // Arbitragem: comprar na spot, vender na futures
+              if (spotPrice < futuresPrice) {
+                const profitGross = (futuresPrice - spotPrice) * amount;
                 const profitNet = profitGross - profitGross * feeRate * 2;
                 if (profitNet >= minProfit && profitNet <= maxProfit) {
                   const op: Opportunity = {
                     type: "arbitrage",
-                    buyExchange: ex1.name,
-                    sellExchange: ex2.name,
+                    buyExchange: spotEx.name,
+                    sellExchange: futuresEx.name,
                     symbol,
-                    buyPrice: price1,
-                    sellPrice: price2,
+                    buyPrice: spotPrice,
+                    sellPrice: futuresPrice,
                     profit: profitNet,
                   };
                   opportunities.push(op);
@@ -159,21 +153,18 @@ export async function monitorOpportunities(
                 }
               }
 
-              if (
-                ex1.type === "spot" &&
-                ex2.type === "futures" &&
-                Math.abs(price1 - price2) > 10
-              ) {
+              // Convergência: comprar na spot, vender na futures se houver diferença significativa
+              if (Math.abs(spotPrice - futuresPrice) > 10) {
                 const profitEstimate =
-                  Math.abs(price1 - price2) * amount * (1 - feeRate * 2);
+                  Math.abs(spotPrice - futuresPrice) * amount * (1 - feeRate * 2);
                 if (profitEstimate >= minProfit && profitEstimate <= maxProfit) {
                   const op: Opportunity = {
                     type: "convergence",
-                    buyExchange: price1 < price2 ? ex1.name : ex2.name,
-                    sellExchange: price1 < price2 ? ex2.name : ex1.name,
+                    buyExchange: spotPrice < futuresPrice ? spotEx.name : futuresEx.name,
+                    sellExchange: spotPrice < futuresPrice ? futuresEx.name : spotEx.name,
                     symbol,
-                    buyPrice: Math.min(price1, price2),
-                    sellPrice: Math.max(price1, price2),
+                    buyPrice: Math.min(spotPrice, futuresPrice),
+                    sellPrice: Math.max(spotPrice, futuresPrice),
                     profit: profitEstimate,
                   };
                   opportunities.push(op);
@@ -330,9 +321,9 @@ async function tryConvergenceForPosition(
 ) {
   const positionRepository = AppDataSource.getRepository(Position);
   const buyEx = exchanges.find((e) => e.name === pos.exchange);
-  const otherExchanges = exchanges.filter((e) => e.name !== pos.exchange);
+  const futuresExchanges = exchanges.filter(ex => ex.type === "futures");
 
-  if (!buyEx || pos.closed) return;
+  if (!buyEx || pos.closed || buyEx.type !== "spot") return;
 
   const instance = buyEx.getInstance();
   const currentPrice = await instance.fetchTicker(pos.symbol).then((ticker: { last: any; }) => ticker.last ?? 0);
@@ -343,7 +334,7 @@ async function tryConvergenceForPosition(
       (pos.stopLossPrice || pos.buyPrice * (1 - stopLossPercent / 100)) ||
     timeElapsed > stopLossTimeout;
 
-  for (const sellEx of otherExchanges) {
+  for (const sellEx of futuresExchanges) {
     const sellInstance = sellEx.getInstance();
     const sellPrice = await sellInstance.fetchTicker(pos.symbol).then((ticker: { last: any; }) => ticker.last ?? 0);
 
