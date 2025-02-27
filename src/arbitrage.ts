@@ -101,7 +101,9 @@ export async function monitorOpportunities(
             }
 
             const feeRate = 0.001;
-            const amount = tradeAmount / spotPrice;
+            const amount = tradeAmount / spotPrice; // Quantidade em moeda base (ex.: XRP)
+            const cost = tradeAmount; // Custo em USDT
+            logger.info(`Calculado para ${symbol}: amount=${amount.toFixed(4)} ${symbol.split('/')[0]}, cost=${cost.toFixed(2)} USDT (tradeAmount: ${tradeAmount} USDT, spotPrice: ${spotPrice} USDT/${symbol.split('/')[0]})`);
 
             try {
               const [spotBook, futuresBook] = await Promise.all([
@@ -110,6 +112,7 @@ export async function monitorOpportunities(
               ]);
               const buyVolume = spotBook.bids[0]?.[1] || 0;
               const sellVolume = futuresBook.asks[0]?.[1] || 0;
+              logger.info(`Liquidez para ${symbol}: ${spotEx.name} bid: ${buyVolume} ${symbol.split('/')[0]}, ${futuresEx.name} ask: ${sellVolume} ${symbol.split('/')[0]}`);
 
               if (buyVolume < amount || sellVolume < amount) {
                 logger.warn(
@@ -173,13 +176,21 @@ export async function executeOpportunity(op: Opportunity, exchanges: Exchange[])
   const tradeRepository = AppDataSource.getRepository(Trade);
   const buyEx = exchanges.find((e) => e.name === op.buyExchange);
   const sellEx = exchanges.find((e) => e.name === op.sellExchange);
-  const amount = op.profit / (op.sellPrice - op.buyPrice);
+
+  // Define o custo em USDT (tradeAmount) diretamente para ordens de compra
+  const tradeAmount = 5; // Ajuste conforme comando CLI ou configuração
+  const amountBuy = tradeAmount; // Em USDT para Gate.io
+  const amountSell = tradeAmount / op.buyPrice; // Quantidade em moeda base para venda
+
+  // Ajuste mínimo para Gate.io (3 USDT)
+  const minOrderSize = buyEx?.name.includes("gate") ? 3 : 0;
+  const adjustedBuyAmount = Math.max(amountBuy, minOrderSize);
 
   try {
     const position = new Position();
     position.symbol = op.symbol;
     position.exchange = op.buyExchange;
-    position.amount = amount;
+    position.amount = amountSell; // Quantidade em moeda base
     position.buyPrice = op.buyPrice;
     position.stopLossPrice = op.buyPrice * (1 - 0.05);
     position.timestamp = new Date();
@@ -190,37 +201,63 @@ export async function executeOpportunity(op: Opportunity, exchanges: Exchange[])
     buyTrade.symbol = op.symbol;
     buyTrade.exchange = op.buyExchange;
     buyTrade.type = "buy";
-    buyTrade.amount = amount;
+    buyTrade.amount = adjustedBuyAmount; // Custo em USDT
     buyTrade.price = op.buyPrice;
     buyTrade.timestamp = new Date();
 
     try {
-      await buyEx?.getInstance().createMarketBuyOrder(op.symbol, amount);
-      buyTrade.success = true;
-      logger.info(`Compra executada: ${op.symbol} em ${op.buyExchange} por ${op.buyPrice}`);
+      const buyInstance = buyEx?.getInstance();
+      if (buyInstance) {
+        // Configura Gate.io para aceitar custo em USDT
+        if (buyInstance.id.includes("gate")) {
+          buyInstance.options['createMarketBuyOrderRequiresPrice'] = false;
+          await buyInstance.createMarketBuyOrder(op.symbol, adjustedBuyAmount); // Passa o custo em USDT
+        } else {
+          await buyInstance.createMarketBuyOrder(op.symbol, amountSell); // Quantidade em moeda base
+        }
+        buyTrade.success = true;
+        logger.info(`Compra executada: ${op.symbol} em ${op.buyExchange} por ${op.buyPrice} (custo: ${adjustedBuyAmount} USDT)`);
+      }
     } catch (error: unknown) {
       buyTrade.success = false;
       buyTrade.error = error instanceof Error ? error.message : String(error);
       logger.error(`Erro na compra de ${op.symbol}: ${buyTrade.error}`);
+      await tradeRepository.save(buyTrade);
+      return; // Interrompe se a compra falhar
     }
     await tradeRepository.save(buyTrade);
+
+    // Verifica saldo na Bybit antes da venda
+    const sellInstance = sellEx?.getInstance();
+    if (sellInstance) {
+      const balance = await sellInstance.fetchBalance();
+      console.log(balance)
+      const baseCurrency = op.symbol.split('/')[0]; // ex.: AAVE
+      const availableBalance = balance.free[baseCurrency] || 0;
+      if (availableBalance < amountSell) {
+        logger.error(`Saldo insuficiente em ${sellEx?.name} para vender ${amountSell} ${baseCurrency}. Disponível: ${availableBalance}`);
+        return;
+      }
+    }
 
     const sellTrade = new Trade();
     sellTrade.symbol = op.symbol;
     sellTrade.exchange = op.sellExchange;
     sellTrade.type = "sell";
-    sellTrade.amount = amount;
+    sellTrade.amount = amountSell; // Quantidade em moeda base
     sellTrade.price = op.sellPrice;
     sellTrade.timestamp = new Date();
 
     try {
-      await sellEx?.getInstance().createMarketSellOrder(op.symbol, amount);
-      sellTrade.success = true;
-      logger.info(`Venda executada: ${op.type} em ${op.symbol} -> Lucro: ${op.profit}`);
-      position.closed = false;
-      position.sellPrice = op.sellPrice;
-      position.profit = op.profit;
-      await positionRepository.save(position);
+      if (sellInstance) {
+        await sellInstance.createMarketSellOrder(op.symbol, amountSell);
+        sellTrade.success = true;
+        logger.info(`Venda executada: ${op.type} em ${op.symbol} -> Lucro: ${op.profit}`);
+        position.closed = false; // Continua para convergência
+        position.sellPrice = op.sellPrice;
+        position.profit = op.profit;
+        await positionRepository.save(position);
+      }
     } catch (error: unknown) {
       sellTrade.success = false;
       sellTrade.error = error instanceof Error ? error.message : String(error);
@@ -303,18 +340,28 @@ async function tryConvergenceForPosition(
     spotSellTrade.symbol = pos.symbol;
     spotSellTrade.exchange = buyEx.name;
     spotSellTrade.type = "sell";
-    spotSellTrade.amount = amount;
+    spotSellTrade.amount = amount * spotPrice; // Custo em USDT
     spotSellTrade.price = spotPrice;
     spotSellTrade.timestamp = new Date();
 
     try {
-      await instance.createMarketSellOrder(pos.symbol, amount);
+      const sellInstance = buyEx.getInstance();
+      if (sellInstance.id.includes("gate")) {
+        // Garante mínimo de 3 USDT para Gate.io
+        const adjustedSellAmount = Math.max(amount * spotPrice, 3);
+        sellInstance.options['createMarketBuyOrderRequiresPrice'] = false; // Configuração para Gate.io
+        await sellInstance.createMarketSellOrder(pos.symbol, adjustedSellAmount); // Passa custo em USDT
+      } else {
+        await sellInstance.createMarketSellOrder(pos.symbol, amount); // Quantidade em moeda base
+      }
       spotSellTrade.success = true;
       logger.info(`Venda na spot executada: ${pos.symbol} em ${buyEx.name} por ${spotPrice}`);
     } catch (error: unknown) {
       spotSellTrade.success = false;
       spotSellTrade.error = error instanceof Error ? error.message : String(error);
       logger.error(`Erro ao vender na spot ${pos.symbol}: ${spotSellTrade.error}`);
+      await tradeRepository.save(spotSellTrade);
+      return; // Interrompe se a venda falhar
     }
     await tradeRepository.save(spotSellTrade);
 
@@ -327,7 +374,15 @@ async function tryConvergenceForPosition(
     futuresBuyTrade.timestamp = new Date();
 
     try {
-      await futuresEx.getInstance().createMarketBuyOrder(pos.symbol, amount);
+      const futuresInstance = futuresEx.getInstance();
+      const balance = await futuresInstance.fetchBalance();
+      const baseCurrency = pos.symbol.split('/')[0];
+      const availableBalance = balance.free[baseCurrency] || 0;
+      if (availableBalance < amount) {
+        logger.error(`Saldo insuficiente em ${futuresEx.name} para comprar ${amount} ${baseCurrency}. Disponível: ${availableBalance}`);
+        return;
+      }
+      await futuresInstance.createMarketBuyOrder(pos.symbol, amount);
       futuresBuyTrade.success = true;
       logger.info(`Fechamento na futures executado: ${pos.symbol} em ${futuresEx.name} por ${futuresPrice}`);
       pos.closed = true;
