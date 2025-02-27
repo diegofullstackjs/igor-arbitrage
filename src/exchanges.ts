@@ -57,8 +57,11 @@ export async function updateCompatibleSymbols(): Promise<void> {
   const allSymbols = new Set(Object.values(marketMap).flatMap(set => Array.from(set)));
   logger.info(`Total de ${allSymbols.size} símbolos únicos encontrados: ${Array.from(allSymbols).join(", ")}`);
 
-  // Passo 3: Valida cada símbolo com WebSocket (se suportado) ou fetchTicker
-  const symbolCompatibility: { [symbol: string]: string[] } = {};
+  // Limpa o banco antes de começar
+  await symbolRepository.clear();
+  logger.info("Banco de símbolos compatíveis limpo");
+
+  // Passo 3: Valida cada símbolo e insere imediatamente no banco
   for (const symbol of allSymbols) {
     logger.info(`Validando símbolo ${symbol}...`);
     const compatibleExchanges: string[] = [];
@@ -93,21 +96,16 @@ export async function updateCompatibleSymbols(): Promise<void> {
     }
 
     if (compatibleExchanges.length >= 2) { // Exige compatibilidade em pelo menos um par spot-futures
-      symbolCompatibility[symbol] = compatibleExchanges;
-      logger.info(`Símbolo ${symbol} adicionado como compatível entre: ${compatibleExchanges.join(", ")}`);
+      const cs = new CompatibleSymbol();
+      cs.symbol = symbol;
+      cs.exchanges = compatibleExchanges;
+      await symbolRepository.save(cs);
+      logger.info(`Símbolo ${symbol} inserido no banco como compatível entre: ${compatibleExchanges.join(", ")}`);
     } else {
       logger.info(`Símbolo ${symbol} não é compatível entre pelo menos 2 exchanges`);
     }
   }
 
-  // Passo 4: Limpa símbolos existentes e salva os novos
-  await symbolRepository.clear();
-  const compatibleSymbols = Object.entries(symbolCompatibility).map(([symbol, exchanges]) => {
-    const cs = new CompatibleSymbol();
-    cs.symbol = symbol;
-    cs.exchanges = exchanges;
-    return cs;
-  });
-  await symbolRepository.save(compatibleSymbols);
-  logger.info(`Salvou ${compatibleSymbols.length} símbolos compatíveis no banco: ${compatibleSymbols.map(cs => cs.symbol).join(", ")}`);
+  const totalSaved = await symbolRepository.count();
+  logger.info(`Total de ${totalSaved} símbolos compatíveis salvos no banco`);
 }
