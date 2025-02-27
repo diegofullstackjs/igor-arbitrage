@@ -16,8 +16,6 @@ export interface Opportunity {
   profit: number;
 }
 
-const marketCache: { [key: string]: any } = {};
-
 export async function monitorOpportunities(
   exchanges: Exchange[],
   symbols: string[],
@@ -27,7 +25,7 @@ export async function monitorOpportunities(
   tradeAmount: number = 5,
   stopLossPercent: number = 5,
   stopLossTimeout: number = 3600000,
-  convergenceRange: number = 5 // Novo parâmetro
+  convergenceRange: number = 5
 ): Promise<Opportunity[]> {
   const prices: {
     [key: string]: { [symbol: string]: { price: number; volume: number } };
@@ -42,21 +40,6 @@ export async function monitorOpportunities(
       exchanges.length
     } exchanges e símbolos: ${symbols.join(", ")}`
   );
-
-  for (const ex of exchanges) {
-    const instance = ex.getInstance();
-    if (!marketCache[ex.name]) {
-      marketCache[ex.name] = await instance.loadMarkets();
-      logger.info(`Mercados carregados para ${ex.name}`);
-    }
-    const markets = marketCache[ex.name];
-    for (const symbol of symbols) {
-      if (!markets[symbol]) {
-        logger.warn(`Par ${symbol} não suportado na exchange ${ex.name}`);
-        continue;
-      }
-    }
-  }
 
   manageOpenPositions(
     exchanges,
@@ -95,12 +78,12 @@ export async function monitorOpportunities(
       );
 
       const priceEntries: Price[] = [];
-      for (const symbol of symbols) {
-        const spotExchanges = exchanges.filter(ex => ex.type === "spot");
-        const futuresExchanges = exchanges.filter(ex => ex.type === "futures");
+      const spotExchanges = exchanges.filter(ex => ex.type === "spot");
+      const futuresExchanges = exchanges.filter(ex => ex.type === "futures");
 
-        for (const spotEx of spotExchanges) {
-          for (const futuresEx of futuresExchanges) {
+      for (const spotEx of spotExchanges) {
+        for (const futuresEx of futuresExchanges) {
+          for (const symbol of symbols) {
             const dataSpot = prices[spotEx.name]?.[symbol];
             const dataFutures = prices[futuresEx.name]?.[symbol];
             if (!dataSpot || !dataFutures) continue;
@@ -185,15 +168,12 @@ async function createOpportunityEntry(op: Opportunity): Promise<Price> {
   return entry;
 }
 
-export async function executeOpportunity(
-  op: Opportunity,
-  exchanges: Exchange[]
-) {
+export async function executeOpportunity(op: Opportunity, exchanges: Exchange[]) {
   const positionRepository = AppDataSource.getRepository(Position);
   const tradeRepository = AppDataSource.getRepository(Trade);
   const buyEx = exchanges.find((e) => e.name === op.buyExchange);
   const sellEx = exchanges.find((e) => e.name === op.sellExchange);
-  const amount = op.profit / (op.sellPrice - op.buyPrice); // Calcula o amount baseado no lucro
+  const amount = op.profit / (op.sellPrice - op.buyPrice);
 
   try {
     const position = new Position();
@@ -201,7 +181,7 @@ export async function executeOpportunity(
     position.exchange = op.buyExchange;
     position.amount = amount;
     position.buyPrice = op.buyPrice;
-    position.stopLossPrice = op.buyPrice * (1 - 0.05); // Ajustar conforme stopLossPercent
+    position.stopLossPrice = op.buyPrice * (1 - 0.05);
     position.timestamp = new Date();
     position.closed = false;
     await positionRepository.save(position);
@@ -217,9 +197,7 @@ export async function executeOpportunity(
     try {
       await buyEx?.getInstance().createMarketBuyOrder(op.symbol, amount);
       buyTrade.success = true;
-      logger.info(
-        `Compra executada: ${op.symbol} em ${op.buyExchange} por ${op.buyPrice}`
-      );
+      logger.info(`Compra executada: ${op.symbol} em ${op.buyExchange} por ${op.buyPrice}`);
     } catch (error: unknown) {
       buyTrade.success = false;
       buyTrade.error = error instanceof Error ? error.message : String(error);
@@ -238,10 +216,8 @@ export async function executeOpportunity(
     try {
       await sellEx?.getInstance().createMarketSellOrder(op.symbol, amount);
       sellTrade.success = true;
-      logger.info(
-        `Venda executada: ${op.type} em ${op.symbol} -> Lucro: ${op.profit}`
-      );
-      position.closed = false; // Mantém aberta para convergência
+      logger.info(`Venda executada: ${op.type} em ${op.symbol} -> Lucro: ${op.profit}`);
+      position.closed = false;
       position.sellPrice = op.sellPrice;
       position.profit = op.profit;
       await positionRepository.save(position);
@@ -269,9 +245,7 @@ async function manageOpenPositions(
   const tradeRepository = AppDataSource.getRepository(Trade);
 
   const checkPositions = async () => {
-    const openPositions = await positionRepository.find({
-      where: { closed: false },
-    });
+    const openPositions = await positionRepository.find({ where: { closed: false } });
     if (openPositions.length > 0) {
       logger.info(`Gerenciando ${openPositions.length} posições abertas`);
       for (const pos of openPositions) {
@@ -310,7 +284,7 @@ async function tryConvergenceForPosition(
   if (!buyEx || pos.closed || buyEx.type !== "spot") return;
 
   const instance = buyEx.getInstance();
-  const futuresEx = futuresExchanges[0]; // Assume uma exchange futures disponível
+  const futuresEx = futuresExchanges[0];
   if (!futuresEx) return;
 
   const spotPrice = await instance.fetchTicker(pos.symbol).then((ticker: { last: any; }) => ticker.last ?? 0);
@@ -318,15 +292,13 @@ async function tryConvergenceForPosition(
 
   const timeElapsed = Date.now() - pos.timestamp.getTime();
   const stopLossTriggered =
-    spotPrice <= (pos.stopLossPrice || pos.buyPrice * (1 - stopLossPercent / 100)) ||
-    timeElapsed > stopLossTimeout;
+    spotPrice <= (pos.stopLossPrice || pos.buyPrice * (1 - stopLossPercent / 100)) || timeElapsed > stopLossTimeout;
   const convergenceDetected = Math.abs(spotPrice - futuresPrice) <= convergenceRange;
 
   if (convergenceDetected || stopLossTriggered) {
     const amount = pos.amount;
     const feeRate = 0.001;
 
-    // Venda na spot
     const spotSellTrade = new Trade();
     spotSellTrade.symbol = pos.symbol;
     spotSellTrade.exchange = buyEx.name;
@@ -346,7 +318,6 @@ async function tryConvergenceForPosition(
     }
     await tradeRepository.save(spotSellTrade);
 
-    // Compra na futures (fechamento da venda inicial)
     const futuresBuyTrade = new Trade();
     futuresBuyTrade.symbol = pos.symbol;
     futuresBuyTrade.exchange = futuresEx.name;
@@ -360,8 +331,8 @@ async function tryConvergenceForPosition(
       futuresBuyTrade.success = true;
       logger.info(`Fechamento na futures executado: ${pos.symbol} em ${futuresEx.name} por ${futuresPrice}`);
       pos.closed = true;
-      pos.sellPrice = spotPrice; // Preço final de venda na spot
-      pos.profit = (spotPrice - pos.buyPrice) * amount * (1 - feeRate * 2); // Lucro ajustado
+      pos.sellPrice = spotPrice;
+      pos.profit = (spotPrice - pos.buyPrice) * amount * (1 - feeRate * 2);
       await positionRepository.save(pos);
     } catch (error: unknown) {
       futuresBuyTrade.success = false;

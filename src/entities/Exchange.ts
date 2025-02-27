@@ -1,6 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column } from "typeorm";
 import * as ccxt from "ccxt";
 import {pro as ccxtPro} from "ccxt";
+import logger from "../logger";
 
 @Entity()
 export class Exchange {
@@ -20,10 +21,20 @@ export class Exchange {
   secret!: string;
 
   getInstance() {
-    const config = { apiKey: this.apiKey, secret: this.secret,
-      ...(this.name === "bybit" ? { options: { adjustForTimeDifference: true } } : {})
+    const config = {
+      apiKey: this.apiKey,
+      secret: this.secret,
+      ...(this.name === "bybit" ? { 
+        options: { 
+          adjustForTimeDifference: true,
+          defaultType: this.type == 'futures'? 'future' : 'spot'
+        } 
+      } : {}),
+    };
 
-     };
+    if (this.name === "bybit") {
+      logger.info(`Criando instância para Bybit com timestamp local: ${Date.now()}`);
+    }
 
     if (this.type === "spot") {
       const exchangeClass = (ccxt as any)[this.name];

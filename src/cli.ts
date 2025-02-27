@@ -1,14 +1,16 @@
 import { program } from "commander";
 import { initializeDatabase, AppDataSource } from "./db";
-import { addExchange, getExchanges } from "./exchanges";
+import { addExchange, getExchanges, updateCompatibleSymbols } from "./exchanges";
 import { monitorOpportunities, executeOpportunity } from "./arbitrage";
 import { Price } from "./entities/Price";
+import { CompatibleSymbol } from "./entities/CompatibleSymbol";
 import logger from "./logger";
 
+// Comando para adicionar uma nova exchange
 program
     .command("add-exchange")
     .description("Adicionar uma nova exchange")
-    .option("-n, --name <name>", "Nome da exchange (ex.: binance)")
+    .option("-n, --name <name>", "Nome da exchange (ex.: gate, bybit)")
     .option("-t, --type <type>", "Tipo: spot ou futures")
     .option("-k, --apiKey <key>", "Chave API")
     .option("-s, --secret <secret>", "Segredo API")
@@ -18,10 +20,11 @@ program
         logger.info(`Exchange ${exchange.name} (${exchange.type}) adicionada com ID ${exchange.id}`);
     });
 
+// Comando para remover uma exchange
 program
     .command("remove-exchange")
     .description("Remover uma exchange cadastrada")
-    .option("-n, --name <name>", "Nome da exchange a remover (ex.: binance-spot)")
+    .option("-n, --name <name>", "Nome da exchange a remover (ex.: bybit-spot)")
     .action(async (options) => {
         await initializeDatabase();
         const exchangeRepository = AppDataSource.getRepository("Exchange");
@@ -34,26 +37,40 @@ program
 
         await exchangeRepository.remove(exchange);
         logger.info(`Exchange ${options.name} removida com sucesso`);
+        await updateCompatibleSymbols(); // Atualiza símbolos após remoção
     });
 
+// Comando para parear símbolos manualmente
+program
+    .command("pair-symbols")
+    .description("Parear e salvar símbolos compatíveis entre as exchanges")
+    .action(async () => {
+        await initializeDatabase();
+        await updateCompatibleSymbols();
+    });
+
+// Comando para monitorar oportunidades de arbitragem
 program
     .command("monitor")
     .description("Monitorar exchanges para arbitragem e convergência")
-    .option("-e, --exchanges <names>", "Exchanges a monitorar (ex.: binance-spot,kraken-spot)", (val) => val.split(","))
-    .option("-s, --symbols <symbols>", "Pares a monitorar (ex.: BTC/USDT,ETH/USDT)", (val) => val.split(","), ["BTC/USDT", "ETH/USDT"])
+    .option("-e, --exchanges <names>", "Exchanges a monitorar (ex.: bybit-spot,gate-spot)", (val) => val.split(","))
+    .option("-s, --symbols <symbols>", "Símbolos a monitorar (ex.: BTC/USDT,ETH/USDT)", (val) => val.split(","))
     .option("-a, --auto", "Executar trades automaticamente")
     .option("-v, --min-volume <value>", "Volume mínimo nas 24h", parseFloat, 100)
-    .option("-p, --min-profit <value>", "Lucro mínimo desejado", parseFloat, 5)
-    .option("-m, --max-profit <value>", "Lucro máximo permitido", parseFloat, 1000)
+    .option("-p, --min-profit <value>", "Lucro mínimo desejado", parseFloat, 1)
+    .option("-m, --max-profit <value>", "Lucro máximo permitido", parseFloat, 5)
     .option("-l, --stop-loss <percent>", "Stop-loss em %", parseFloat, 5)
     .option("-t, --timeout <ms>", "Timeout para stop-loss em ms", parseFloat, 3600000)
-    .option("-ta, --trade-amount <value>", "Montante para trades em USDT", parseFloat, 5) // Ajustado para 5
-    .option("-cr, --convergence-range <value>", "Range de convergência em USDT", parseFloat, 5) // Nova opção
+    .option("-ta, --trade-amount <value>", "Montante para trades em USDT", parseFloat, 1)
+    .option("-cr, --convergence-range <value>", "Range de convergência em USDT", parseFloat, 5)
+    .option("-sl, --symbol-limit <value>", "Limite máximo de símbolos a monitorar", parseInt, 1000)
     .option("--test", "Usar modo de teste (ex.: Binance Testnet)")
     .option("--all-symbols", "Monitorar todos os símbolos compatíveis das exchanges")
     .action(async (options) => {
         await initializeDatabase();
         let allExchanges = await getExchanges();
+
+        // Configuração para modo de teste (Testnet)
         if (options.test) {
             allExchanges = allExchanges.map(ex => {
                 const instance = ex.getInstance();
@@ -65,6 +82,7 @@ program
             logger.warn("Executando em modo real. Certifique-se de que as chaves de API estão configuradas corretamente.");
         }
 
+        // Filtra as exchanges selecionadas ou usa todas se nenhuma for especificada
         const selectedExchanges = options.exchanges
             ? allExchanges.filter(ex => options.exchanges.includes(ex.name))
             : allExchanges;
@@ -74,20 +92,31 @@ program
             process.exit(1);
         }
 
-        let symbolsToMonitor: string[] = options.symbols;
+        let symbolsToMonitor: string[];
         if (options.allSymbols) {
-            const symbolSet = new Set<string>();
-            await Promise.all(selectedExchanges.map(async (ex) => {
-                const instance = ex.getInstance();
-                const markets = await instance.loadMarkets();
-                Object.keys(markets).forEach(symbol => symbolSet.add(symbol));
-            }));
-            symbolsToMonitor = Array.from(symbolSet);
-            logger.info(`Monitorando todos os ${symbolsToMonitor.length} símbolos compatíveis: ${symbolsToMonitor.join(", ")}`);
+            const symbolRepository = AppDataSource.getRepository(CompatibleSymbol);
+            const compatibleSymbols = await symbolRepository.find();
+            if (compatibleSymbols.length === 0) {
+                logger.error("Nenhum símbolo compatível encontrado no banco. Execute 'pair-symbols' primeiro.");
+                process.exit(1);
+            }
+
+            const symbolLimit = isNaN(options.symbolLimit) ? 1000 : options.symbolLimit;
+            symbolsToMonitor = compatibleSymbols
+                .filter(cs => selectedExchanges.every(ex => cs.exchanges.includes(ex.name))) // Filtra por exchanges selecionadas
+                .map(cs => cs.symbol)
+                .slice(0, symbolLimit);
+            logger.info(`Monitorando ${symbolsToMonitor.length} símbolos compatíveis (limite: ${symbolLimit}): ${symbolsToMonitor.join(", ")}`);
         } else {
+            symbolsToMonitor = options.symbols || [];
+            if (symbolsToMonitor.length === 0) {
+                logger.error("Nenhum símbolo especificado. Use --symbols ou --all-symbols.");
+                process.exit(1);
+            }
             logger.info(`Monitorando símbolos especificados: ${symbolsToMonitor.join(", ")}`);
         }
 
+        // Exibe informações de configuração
         logger.info(`Monitorando ${selectedExchanges.length} exchanges com:`);
         logger.info(`  Volume mínimo: ${options.minVolume}`);
         logger.info(`  Lucro mínimo: ${options.minProfit}, máximo: ${options.maxProfit}`);
@@ -95,6 +124,7 @@ program
         logger.info(`  Montante da ordem: ${options.tradeAmount} USDT`);
         logger.info(`  Range de convergência: ${options.convergenceRange} USDT`);
 
+        // Loop infinito para monitoramento contínuo
         while (true) {
             const opportunities = await monitorOpportunities(
                 selectedExchanges,
@@ -105,7 +135,7 @@ program
                 options.tradeAmount,
                 options.stopLoss,
                 options.timeout,
-                options.convergenceRange // Novo parâmetro
+                options.convergenceRange
             );
 
             for (const op of opportunities) {
@@ -115,10 +145,12 @@ program
                 }
             }
 
+            // Aguarda 5 segundos antes da próxima iteração
             await new Promise(resolve => setTimeout(resolve, 5000));
         }
     });
 
+// Comando para exibir estatísticas de volume
 program
     .command("volume-stats")
     .description("Exibir estatísticas de volume das exchanges")
@@ -149,4 +181,5 @@ program
         });
     });
 
+// Executa o parsing dos comandos
 program.parse();
