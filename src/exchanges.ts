@@ -109,3 +109,5 @@ export async function updateCompatibleSymbols(): Promise<void> {
   const totalSaved = await symbolRepository.count();
   logger.info(`Total de ${totalSaved} símbolos compatíveis salvos no banco`);
 }
+
+export { Exchange };
