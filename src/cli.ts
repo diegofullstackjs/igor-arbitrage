@@ -298,7 +298,7 @@ program
   .option("-l, --stop-loss <percent>", "Stop-loss em %", parseFloat, 5)
   .option("-t, --timeout <ms>", "Timeout para stop-loss em ms", parseFloat, 3600000)
   .option("-ta, --trade-amount <value>", "Montante para trades em USDT", parseFloat, 5)
-  .option("-cr, --convergence-range <value>", "Range de convergência em USDT", parseFloat, 5)
+  .option("-cr, --convergence-range <value>", "Range de convergência em USDT", parseFloat)
   .option("-sl, --symbol-limit <value>", "Limite máximo de símbolos a monitorar", parseInt, 1000)
   .option("--test", "Usar modo de teste (ex.: Binance Testnet)")
   .option("--all-symbols", "Monitorar todos os símbolos compatíveis das exchanges")
